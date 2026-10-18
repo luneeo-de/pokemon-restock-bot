@@ -2,7 +2,9 @@ name: Restock-Check
 
 on:
   schedule:
-    - cron: "*/5 * * * *"   # GitHub startet in der Praxis oft mit ein paar Minuten Verzögerung
+    # GitHub startet geplante Läufe nur grob alle 20–30 Min. Darum prüft jeder Lauf
+    # selbst ca. 30 Min. lang alle 3 Min.; der nächste Lauf wartet in der Warteschlange.
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
 concurrency:
@@ -12,7 +14,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -33,6 +35,8 @@ jobs:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           MAX_AUFSCHLAG_PROZENT: ${{ vars.MAX_AUFSCHLAG_PROZENT || '10' }}
+          LOOP_MINUTES: ${{ github.event_name == 'schedule' && '30' || '0' }}
+          INTERVAL_SECONDS: "180"
         run: python bot.py
 
       - name: Zustand speichern

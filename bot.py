@@ -9,6 +9,7 @@ Umgebungsvariablen:
   MAX_AUFSCHLAG_PROZENT              – erlaubter Aufschlag auf die UVP (Standard 10)
   STATE_FILE                         – Pfad zur Zustandsdatei (Standard state.json)
   DRY_RUN=1                          – nichts senden, nur anzeigen
+  LOOP_MINUTES, INTERVAL_SECONDS     – Dauerschleife (GitHub: 30 Min. lang alle 3 Min.)
 """
 
 import html
@@ -226,8 +227,7 @@ def fmt_offer(o) -> str:
             f"👉 {html.escape(o['url'])}")
 
 
-def main():
-    state = load_state()
+def run_once(state):
     now = datetime.now(BERLIN)
     found, errors = [], {}
 
@@ -240,9 +240,13 @@ def main():
         except Exception as e:  # noqa: BLE001
             errors[shop["name"]] = str(e)[:200]
             print(f"{shop['name']:20} FEHLER: {e}", file=sys.stderr)
-        time.sleep(0.5)
+        time.sleep(0.3)
 
     new_alerts, current = [], {}
+    # Angebote von Shops, die gerade nicht antworten, behalten – sonst doppelter Ping beim nächsten Erfolg
+    for url, v in state["offers"].items():
+        if v["shop"] in errors:
+            current[url] = v
     for o in found:
         if not is_buyable(o):
             continue
@@ -254,13 +258,16 @@ def main():
     for o in new_alerts:
         telegram("🚨 <b>Jetzt bestellbar!</b>\n\n" + fmt_offer(o))
 
-    # Shop dauerhaft kaputt? Einmal Bescheid geben (nach ca. 1 Stunde Fehlern am Stück)
+    # Shop dauerhaft kaputt? Einmal Bescheid geben, wenn er seit 1 Stunde am Stück nicht antwortet
     prev_err = state.get("errors", {})
-    for name, err in errors.items():
-        count = prev_err.get(name, {}).get("count", 0) + 1
-        errors[name] = {"count": count, "msg": err}
-        if count == 12:
-            telegram(f"⚠️ {html.escape(name)} lässt sich seit ca. 1 Stunde nicht abfragen:\n{html.escape(err)}")
+    for name, msg in list(errors.items()):
+        prev = prev_err.get(name) or {}
+        since = prev.get("since") or now.isoformat()
+        warned = prev.get("warned", False)
+        if not warned and (now - datetime.fromisoformat(since)).total_seconds() >= 3600:
+            telegram(f"⚠️ {html.escape(name)} lässt sich seit ca. 1 Stunde nicht abfragen:\n{html.escape(msg)}")
+            warned = True
+        errors[name] = {"since": since, "warned": warned, "msg": msg}
 
     # Tägliches Lebenszeichen um 9 Uhr
     today = now.strftime("%Y-%m-%d")
@@ -276,7 +283,20 @@ def main():
 
     state["offers"], state["errors"], state["last_run"] = current, errors, now.isoformat()
     save_state(state)
-    print(f"\n{len(found)} Angebote geprüft, {len(current)} kaufbar zu UVP, {len(new_alerts)} neue Pings.")
+    print(f"\n{now:%H:%M} – {len(found)} Angebote geprüft, {len(current)} kaufbar zu UVP, {len(new_alerts)} neue Pings.\n")
+
+
+def main():
+    """LOOP_MINUTES>0: so lange wiederholt prüfen (alle INTERVAL_SECONDS), sonst genau einmal."""
+    loop_until = time.time() + float(os.environ.get("LOOP_MINUTES", "0")) * 60
+    interval = float(os.environ.get("INTERVAL_SECONDS", "180"))
+    state = load_state()
+    while True:
+        started = time.time()
+        run_once(state)
+        if time.time() + interval > loop_until:
+            break
+        time.sleep(max(0, interval - (time.time() - started)))
 
 
 if __name__ == "__main__":
