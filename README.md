@@ -1,6 +1,6 @@
 # Pokémon 30 Jahre – Restock-Bot
 
-Prüft alle ~5 Minuten deutsche Shops auf Produkte der deutschen Edition „Pokémon 30 Jahre“ und schickt
+Prüft alle ~3 Minuten 44 deutsche (und österreichische) Shops auf Produkte der deutschen Edition „Pokémon 30 Jahre“ und schickt
 einen Telegram-Ping, sobald etwas **lieferbar** ist und **höchstens UVP + 10 %** kostet.
 Scalper-Preise und Fremdsprachen (EN/JP/CN/KR) werden ignoriert.
 

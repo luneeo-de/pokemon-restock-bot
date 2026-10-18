@@ -17,7 +17,7 @@ PRODUCTS = [
     ("minitin_display", "Mini-Tin Display (10 Tins)", 139.90, ["mini-tin display", "mini tin display", "mini-tin-display"]),
     ("bundle", "Boosterbundle (6 Booster)", 29.99, ["bundle"]),
     ("minitin", "Mini-Tin-Box", 13.99, ["mini-tin", "mini tin", "minitin"]),
-    ("tin", "Tin-Box Feelinara-ex / Quajutsu-ex", 24.99, ["tin-box", "tin box", "tin #", "tin 1", "tin 2"]),
+    ("tin", "Tin-Box Feelinara-ex / Quajutsu-ex", 24.99, ["tin-box", "tin box", "tin #", "tin 1", "tin 2", "tin -", "tin tag", "tin nacht"]),
     ("deck", "Kampfdeck Psiana-ex / Nachtara-ex", 25.99, ["kampfdeck", "battle deck"]),
     ("ordner", "Ordner-Kollektion", 46.99, ["ordner", "binder"]),
     ("poster", "Poster-Kollektion", 23.99, ["poster"]),
@@ -37,7 +37,8 @@ EXCLUDE = [
     "t-chinese", "s-chinese", "koreanisch", "korean", "thai", "indonesisch", "franzosisch", "italienisch",
     "spanisch", "pokemon center", "einzelkarte", "graded", "psa ", "cgc ", "leer", "ohne booster",
     "kartenhullen", "sleeves", "kuscheltier", "plusch", "puzzle", "select-serie", "first partner",
-    "multipack", "sortiert", "wizard", "x booster", "x30", "lot ",
+    "multipack", "sortiert", "wizard", "acryl", " case", "schutzhulle", "schutzbox", "protector",
+    "magnetic", "toploader", "aufbewahrung", "x booster", "x30", "lot ",
 ]
 
 
@@ -53,7 +54,7 @@ def is_german_30_jahre(title: str) -> bool:
     if "30 jahre" in t or "30-jahre" in t:
         return True
     # Manche Shops schreiben „30th … (Deutsch)"
-    return ("30th" in t or "jubilaum" in t) and "deutsch" in t
+    return ("30th" in t or "jubilaum" in t) and ("deutsch" in t or "(de)" in t or " de " in t)
 
 
 def classify(title: str):

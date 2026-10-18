@@ -149,7 +149,15 @@ def check_shopify(shop):
 
 
 def check_detail(shop, url):
-    title, price, ok, pre = parse_detail(fetch(url))
+    page = fetch(url)
+    title, price, ok, pre = parse_detail(page)
+    # Shops ohne strukturierte Daten: eigene Regexe aus shops.py
+    if shop.get("price_regex") and price is None:
+        m = re.search(shop["price_regex"], page)
+        price = to_price(m.group(1)) if m else None
+    if shop.get("avail_regex") and ok is None:
+        m = re.search(shop["avail_regex"], page)
+        ok = bool(m) and m.group(1) in shop.get("avail_ok", ["available"])
     if not title:
         return None
     return offer(shop, title, url, price, ok, pre)
@@ -159,7 +167,7 @@ def check_links(shop):
     page = fetch(shop["url"])
     links = list(dict.fromkeys(re.findall(shop["link_pattern"], page)))[:30]
     with ThreadPoolExecutor(6) as ex:
-        return [o for o in ex.map(lambda u: check_detail(shop, html.unescape(u)), links) if o]
+        return [o for o in ex.map(lambda u: check_detail(shop, urllib.parse.urljoin(shop["base"], html.unescape(u))), links) if o]
 
 
 def check_jsonld(shop):
@@ -181,7 +189,26 @@ def check_jsonld(shop):
     return out
 
 
-CHECKERS = {"shopify": check_shopify, "links": check_links, "jsonld": check_jsonld}
+def check_lidl(shop):
+    out, seen = [], set()
+    for q in shop["queries"]:
+        url = ("https://www.lidl.de/q/api/search?assortment=DE&locale=de_DE&version=v2.0.0&fetchsize=48&q="
+               + urllib.parse.quote(q))
+        for item in json.loads(fetch(url, "*/*")).get("items", []):  # Lidl antwortet auf application/json mit 401
+            if item.get("resultClass") != "product":
+                continue
+            d = item.get("gridbox", {}).get("data", {})
+            link = d.get("canonicalUrl") or ""
+            if not link or link in seen:
+                continue
+            seen.add(link)
+            badges = [b.get("type") for b in (d.get("stockAvailability", {}).get("badgeInfo", {}) or {}).get("badges", [])]
+            out.append(offer(shop, d.get("fullTitle") or "", link, to_price((d.get("price") or {}).get("price")),
+                             "AVAILABLE_ONLINE" in badges))
+    return out
+
+
+CHECKERS = {"shopify": check_shopify, "links": check_links, "jsonld": check_jsonld, "lidl": check_lidl}
 
 
 # ---------- Bewertung, Zustand, Telegram ----------
@@ -227,11 +254,21 @@ def fmt_offer(o) -> str:
             f"👉 {html.escape(o['url'])}")
 
 
+def shop_interval(shop) -> float:
+    # Shops, bei denen jede Produktseite einzeln abgerufen wird, seltener fragen (sonst droht Sperre)
+    return shop.get("every", 540 if shop["type"] == "links" else 0)
+
+
 def run_once(state):
     now = datetime.now(BERLIN)
-    found, errors = [], {}
+    found, errors, skipped = [], {}, set()
+    last = state.setdefault("last_checked", {})
 
     for shop in SHOPS:
+        if time.time() - last.get(shop["name"], 0) < shop_interval(shop) - 30:
+            skipped.add(shop["name"])
+            continue
+        last[shop["name"]] = time.time()
         try:
             res = CHECKERS[shop["type"]](shop)
             found += res
@@ -240,12 +277,17 @@ def run_once(state):
         except Exception as e:  # noqa: BLE001
             errors[shop["name"]] = str(e)[:200]
             print(f"{shop['name']:20} FEHLER: {e}", file=sys.stderr)
-        time.sleep(0.3)
+        time.sleep(0.2)
+    # Übersprungene Shops behalten ihren bisherigen Fehlerstatus
+    for name in skipped:
+        if name in state.get("errors", {}):
+            errors[name] = state["errors"][name]["msg"]
 
     new_alerts, current = [], {}
-    # Angebote von Shops, die gerade nicht antworten, behalten – sonst doppelter Ping beim nächsten Erfolg
+    # Angebote von Shops, die gerade nicht antworten oder diesmal übersprungen wurden, behalten –
+    # sonst gäbe es beim nächsten Abruf einen doppelten Ping
     for url, v in state["offers"].items():
-        if v["shop"] in errors:
+        if v["shop"] in errors or v["shop"] in skipped:
             current[url] = v
     for o in found:
         if not is_buyable(o):
@@ -283,7 +325,7 @@ def run_once(state):
 
     state["offers"], state["errors"], state["last_run"] = current, errors, now.isoformat()
     save_state(state)
-    print(f"\n{now:%H:%M} – {len(found)} Angebote geprüft, {len(current)} kaufbar zu UVP, {len(new_alerts)} neue Pings.\n")
+    print(f"\n{now:%H:%M} – {len(SHOPS) - len(skipped)} Shops, {len(found)} Angebote geprüft, {len(current)} kaufbar zu UVP, {len(new_alerts)} neue Pings.\n")
 
 
 def main():
