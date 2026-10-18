@@ -1,0 +1,283 @@
+"""Pokémon-30-Jahre-Restock-Bot.
+
+Prüft alle Shops aus shops.py, ordnet die Treffer dem Katalog zu und schickt einen
+Telegram-Ping, sobald ein Produkt lieferbar ist UND höchstens UVP + Aufschlag kostet.
+Gepingt wird nur beim Wechsel „nicht kaufbar → kaufbar", nicht bei jedem Lauf.
+
+Umgebungsvariablen:
+  TELEGRAM_TOKEN, TELEGRAM_CHAT_ID   – ohne die wird nur in die Konsole geschrieben
+  MAX_AUFSCHLAG_PROZENT              – erlaubter Aufschlag auf die UVP (Standard 10)
+  STATE_FILE                         – Pfad zur Zustandsdatei (Standard state.json)
+  DRY_RUN=1                          – nichts senden, nur anzeigen
+"""
+
+import html
+import json
+import os
+import re
+import sys
+import time
+import urllib.parse
+import urllib.request
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+from catalog import NAMES, UVP, classify
+from shops import SHOPS
+
+UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+      "(KHTML, like Gecko) Chrome/141.0 Safari/537.36")
+AUFSCHLAG = float(os.environ.get("MAX_AUFSCHLAG_PROZENT", "10")) / 100
+STATE_FILE = os.environ.get("STATE_FILE", os.path.join(os.path.dirname(__file__), "state.json"))
+DRY_RUN = os.environ.get("DRY_RUN") == "1"
+BERLIN = ZoneInfo("Europe/Berlin")
+
+AVAILABLE = ("instock", "preorder", "presale", "limitedavailability", "onlineonly")
+
+
+def fetch(url: str, accept: str = "text/html") -> str:
+    url = urllib.parse.quote(url, safe=":/?&=%#+,;@[]")  # Umlaute in Pfaden (z. B. Alternate)
+    req = urllib.request.Request(url, headers={
+        "User-Agent": UA, "Accept": accept, "Accept-Language": "de-DE,de;q=0.9"})
+    with urllib.request.urlopen(req, timeout=25) as r:
+        return r.read().decode("utf-8", errors="ignore")
+
+
+def price_limit(key: str) -> float:
+    return round(UVP[key] * (1 + AUFSCHLAG) + 0.01, 2)
+
+
+def to_price(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    s = str(value).strip().replace("€", "").replace("\xa0", "").strip()
+    if "," in s:  # deutsches Format 1.234,56
+        s = s.replace(".", "").replace(",", ".")
+    try:
+        return float(s)
+    except ValueError:
+        return None
+
+
+def availability_of(value):
+    """schema.org-Availability → True / False / None (unbekannt) + Vorbestellung?"""
+    if not value:
+        return None, False
+    v = str(value).lower().rsplit("/", 1)[-1]
+    return v in AVAILABLE, v in ("preorder", "presale")
+
+
+# ---------- JSON-LD / Microdata ----------
+
+def jsonld_products(page: str):
+    out = []
+
+    def walk(o):
+        if isinstance(o, dict):
+            t = o.get("@type")
+            if t == "Product" or (isinstance(t, list) and "Product" in t):
+                out.append(o)
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    for block in re.findall(r'<script[^>]*application/ld\+json[^>]*>(.*?)</script>', page, re.S):
+        try:
+            walk(json.loads(block.strip()))
+        except json.JSONDecodeError:
+            continue
+    return out
+
+
+def offer_of(product: dict):
+    offers = product.get("offers")
+    if isinstance(offers, list):
+        offers = offers[0] if offers else None
+    if isinstance(offers, dict) and offers.get("@type") == "AggregateOffer":
+        return to_price(offers.get("lowPrice") or offers.get("price")), offers.get("availability")
+    if isinstance(offers, dict):
+        return to_price(offers.get("price")), offers.get("availability")
+    return None, None
+
+
+def parse_detail(page: str):
+    """Titel, Preis, Verfügbarkeit, Vorbestellung aus einer Produktseite."""
+    title = price = avail = None
+    for p in jsonld_products(page):
+        title = title or p.get("name")
+        pr, av = offer_of(p)
+        price = price if price is not None else pr
+        avail = avail or av
+    if not title:
+        m = re.search(r'property="og:title"\s+content="([^"]*)"', page)
+        title = m.group(1) if m else None
+    if avail is None:  # Microdata (z. B. JTL-Shops)
+        m = re.search(r'itemprop="availability"\s+(?:href|content)="([^"]*)"', page)
+        avail = m.group(1) if m else None
+    if price is None:
+        m = re.search(r'itemprop="price"\s+content="([^"]*)"', page)
+        price = to_price(m.group(1)) if m else None
+    ok, pre = availability_of(avail)
+    return (html.unescape(title).strip() if title else None), price, ok, pre
+
+
+# ---------- Shop-Abfragen ----------
+
+def offer(shop, title, url, price, available, preorder=False):
+    return {"shop": shop["name"], "title": title, "url": urllib.parse.urljoin(shop["base"], url),
+            "price": price, "available": available, "preorder": preorder, "key": classify(title)}
+
+
+def check_shopify(shop):
+    seen, out = set(), []
+    for q in shop["queries"]:
+        url = (f"{shop['base']}/search/suggest.json?q={urllib.parse.quote(q)}"
+               "&resources[type]=product&resources[limit]=10")
+        data = json.loads(fetch(url, "application/json"))
+        for p in data["resources"]["results"]["products"]:
+            if p["url"] in seen:
+                continue
+            seen.add(p["url"])
+            out.append(offer(shop, p["title"], p["url"].split("?")[0], to_price(p.get("price")), bool(p.get("available"))))
+    return out
+
+
+def check_detail(shop, url):
+    title, price, ok, pre = parse_detail(fetch(url))
+    if not title:
+        return None
+    return offer(shop, title, url, price, ok, pre)
+
+
+def check_links(shop):
+    page = fetch(shop["url"])
+    links = list(dict.fromkeys(re.findall(shop["link_pattern"], page)))[:30]
+    with ThreadPoolExecutor(6) as ex:
+        return [o for o in ex.map(lambda u: check_detail(shop, html.unescape(u)), links) if o]
+
+
+def check_jsonld(shop):
+    out = []
+    for p in jsonld_products(fetch(shop["url"])):
+        title = p.get("name") or ""
+        price, av = offer_of(p)
+        ok, pre = availability_of(av)
+        out.append(offer(shop, html.unescape(title), p.get("url") or "", price, ok, pre))
+    # Unbekannte Verfügbarkeit nur bei preislich interessanten Treffern auf der Produktseite nachprüfen
+    todo = [o for o in out if o["available"] is None and o["key"] and o["price"] and o["price"] <= price_limit(o["key"])]
+    for o in todo:
+        try:
+            _, pr, ok, pre = parse_detail(fetch(o["url"]))
+            o["available"], o["preorder"] = ok, pre
+            o["price"] = pr or o["price"]
+        except Exception as e:  # noqa: BLE001
+            print(f"  Detail {o['url']}: {e}", file=sys.stderr)
+    return out
+
+
+CHECKERS = {"shopify": check_shopify, "links": check_links, "jsonld": check_jsonld}
+
+
+# ---------- Bewertung, Zustand, Telegram ----------
+
+def is_buyable(o) -> bool:
+    if not o["key"] or not o["available"] or o["price"] is None:
+        return False
+    # Viel zu billig = falsch zugeordnet (z. B. Einzelkarte statt Box)
+    return UVP[o["key"]] * 0.4 <= o["price"] <= price_limit(o["key"])
+
+
+def load_state():
+    try:
+        with open(STATE_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return {"offers": {}, "errors": {}, "summary_date": None}
+
+
+def save_state(state):
+    with open(STATE_FILE, "w", encoding="utf-8") as f:
+        json.dump(state, f, ensure_ascii=False, indent=1)
+
+
+def telegram(text: str):
+    token, chat = os.environ.get("TELEGRAM_TOKEN"), os.environ.get("TELEGRAM_CHAT_ID")
+    if DRY_RUN or not token or not chat:
+        print("---- (nicht gesendet) ----\n" + text + "\n")
+        return
+    body = urllib.parse.urlencode({"chat_id": chat, "text": text, "parse_mode": "HTML",
+                                   "disable_web_page_preview": "true"}).encode()
+    urllib.request.urlopen(f"https://api.telegram.org/bot{token}/sendMessage", body, timeout=20).read()
+
+
+def fmt_offer(o) -> str:
+    uvp = UVP[o["key"]]
+    diff = o["price"] - uvp
+    rel = "zur UVP" if abs(diff) < 0.5 else (f"{diff:+.2f} € ggü. UVP")
+    tag = " · Vorbestellung" if o["preorder"] else ""
+    return (f"<b>{html.escape(NAMES[o['key']])}</b>\n"
+            f"🛒 {html.escape(o['shop'])}: <b>{o['price']:.2f} €</b> ({rel}, UVP {uvp:.2f} €){tag}\n"
+            f"{html.escape(o['title'])}\n"
+            f"👉 {html.escape(o['url'])}")
+
+
+def main():
+    state = load_state()
+    now = datetime.now(BERLIN)
+    found, errors = [], {}
+
+    for shop in SHOPS:
+        try:
+            res = CHECKERS[shop["type"]](shop)
+            found += res
+            hits = sum(1 for o in res if o["key"])
+            print(f"{shop['name']:20} {len(res):3} Treffer, {hits:2} zugeordnet")
+        except Exception as e:  # noqa: BLE001
+            errors[shop["name"]] = str(e)[:200]
+            print(f"{shop['name']:20} FEHLER: {e}", file=sys.stderr)
+        time.sleep(0.5)
+
+    new_alerts, current = [], {}
+    for o in found:
+        if not is_buyable(o):
+            continue
+        current[o["url"]] = {"price": o["price"], "key": o["key"], "shop": o["shop"], "title": o["title"]}
+        before = state["offers"].get(o["url"])
+        if before is None or o["price"] < before["price"] - 0.5:
+            new_alerts.append(o)
+
+    for o in new_alerts:
+        telegram("🚨 <b>Jetzt bestellbar!</b>\n\n" + fmt_offer(o))
+
+    # Shop dauerhaft kaputt? Einmal Bescheid geben (nach ca. 1 Stunde Fehlern am Stück)
+    prev_err = state.get("errors", {})
+    for name, err in errors.items():
+        count = prev_err.get(name, {}).get("count", 0) + 1
+        errors[name] = {"count": count, "msg": err}
+        if count == 12:
+            telegram(f"⚠️ {html.escape(name)} lässt sich seit ca. 1 Stunde nicht abfragen:\n{html.escape(err)}")
+
+    # Tägliches Lebenszeichen um 9 Uhr
+    today = now.strftime("%Y-%m-%d")
+    if now.hour == 9 and state.get("summary_date") != today:
+        lines = [f"☀️ Restock-Bot läuft. {len(SHOPS) - len(errors)}/{len(SHOPS)} Shops erreichbar."]
+        if current:
+            lines.append("\nAktuell zu UVP lieferbar:")
+            lines += [f"• {NAMES[v['key']]} – {v['shop']} {v['price']:.2f} €" for v in current.values()]
+        else:
+            lines.append("Gerade nichts zu fairen Preisen lieferbar.")
+        telegram("\n".join(lines))
+        state["summary_date"] = today
+
+    state["offers"], state["errors"], state["last_run"] = current, errors, now.isoformat()
+    save_state(state)
+    print(f"\n{len(found)} Angebote geprüft, {len(current)} kaufbar zu UVP, {len(new_alerts)} neue Pings.")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,43 @@
+name: Restock-Check
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # GitHub startet in der Praxis oft mit ein paar Minuten Verzögerung
+  workflow_dispatch:
+
+concurrency:
+  group: restock-check
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      # Zustand (welche Angebote schon gemeldet wurden) zwischen den Läufen merken
+      - name: Zustand laden
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
+          restore-keys: state-
+
+      - name: Shops prüfen
+        env:
+          TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          MAX_AUFSCHLAG_PROZENT: ${{ vars.MAX_AUFSCHLAG_PROZENT || '10' }}
+        run: python bot.py
+
+      - name: Zustand speichern
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: state-${{ github.run_id }}
