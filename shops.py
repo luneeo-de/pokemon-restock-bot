@@ -16,7 +16,9 @@ SHOPS = [
     {"name": "Card-Binder", "type": "shopify", "base": "https://card-binder.com", "queries": ["30 jahre", "30th deutsch"]},
 
     # TCG-Fachhändler mit eigener Shop-Software
-    {"name": "Card-Corner", "type": "links", "base": "https://www.card-corner.de",
+    # Card-Corner: Hinweistexte („Benachrichtigung … sobald") stehen auf jeder Seite → stattdessen Warenkorb-Button prüfen
+    {"name": "Card-Corner", "type": "links", "text_check": False, "require_text": "In den Warenkorb",
+     "base": "https://www.card-corner.de",
      "url": "https://www.card-corner.de/pokemon-30-jahre",
      "link_pattern": r'href="(https://www\.card-corner\.de/Pokemon-30-Jahre-[A-Za-z0-9-]+)"'},
     {"name": "Steinehelden", "type": "links", "base": "https://steinehelden.de",

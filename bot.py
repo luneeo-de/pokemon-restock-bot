@@ -36,6 +36,17 @@ BERLIN = ZoneInfo("Europe/Berlin")
 
 AVAILABLE = ("instock", "preorder", "presale", "limitedavailability", "onlineonly")
 
+# Viele Shops lassen „PreOrder"/„InStock" in den Seitendaten stehen, obwohl das Kontingent weg ist.
+# Steht so etwas im sichtbaren Seitentext, gilt der Artikel als NICHT bestellbar.
+NOT_ORDERABLE = re.compile(
+    r"benachrichtig\w*[^.<\"“”„]{0,25}(sobald|wenn)[^.<\"“”„]{0,30}(verfügbar|lieferbar|wieder|erhältlich)"
+    r"|nicht mehr (verfügbar|lieferbar|bestellbar|erhältlich)|nicht vorrätig|vergriffen", re.I)
+
+
+def visible_text(page: str) -> str:
+    page = re.sub(r"<script.*?</script>|<style.*?</style>|<noscript.*?</noscript>", " ", page, flags=re.S | re.I)
+    return re.sub(r"\s+", " ", html.unescape(re.sub(r"<[^>]+>", " ", page)))
+
 
 def fetch(url: str, accept: str = "text/html") -> str:
     url = urllib.parse.quote(url, safe=":/?&=%#+,;@[]")  # Umlaute in Pfaden (z. B. Alternate)
@@ -106,7 +117,7 @@ def offer_of(product: dict):
     return None, None
 
 
-def parse_detail(page: str):
+def parse_detail(page: str, text_check: bool = True):
     """Titel, Preis, Verfügbarkeit, Vorbestellung aus einer Produktseite."""
     title = price = avail = None
     for p in jsonld_products(page):
@@ -124,6 +135,8 @@ def parse_detail(page: str):
         m = re.search(r'itemprop="price"\s+content="([^"]*)"', page)
         price = to_price(m.group(1)) if m else None
     ok, pre = availability_of(avail)
+    if ok and text_check and NOT_ORDERABLE.search(visible_text(page)):
+        ok = False
     return (html.unescape(title).strip() if title else None), price, ok, pre
 
 
@@ -150,11 +163,14 @@ def check_shopify(shop):
 
 def check_detail(shop, url):
     page = fetch(url)
-    title, price, ok, pre = parse_detail(page)
+    title, price, ok, pre = parse_detail(page, shop.get("text_check", True))
     # Shops ohne strukturierte Daten: eigene Regexe aus shops.py
     if shop.get("price_regex") and price is None:
         m = re.search(shop["price_regex"], page)
         price = to_price(m.group(1)) if m else None
+    # Optional: Text, der nur auf wirklich bestellbaren Seiten steht (z. B. Warenkorb-Button)
+    if ok and shop.get("require_text") and not re.search(shop["require_text"], visible_text(page)):
+        ok = False
     if shop.get("avail_regex") and ok is None:
         m = re.search(shop["avail_regex"], page)
         ok = bool(m) and m.group(1) in shop.get("avail_ok", ["available"])
@@ -181,7 +197,7 @@ def check_jsonld(shop):
     todo = [o for o in out if o["available"] is None and o["key"] and o["price"] and o["price"] <= price_limit(o["key"])]
     for o in todo:
         try:
-            _, pr, ok, pre = parse_detail(fetch(o["url"]))
+            _, pr, ok, pre = parse_detail(fetch(o["url"]), shop.get("text_check", True))
             o["available"], o["preorder"] = ok, pre
             o["price"] = pr or o["price"]
         except Exception as e:  # noqa: BLE001
