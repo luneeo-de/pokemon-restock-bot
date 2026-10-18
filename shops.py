@@ -26,10 +26,11 @@ SHOPS = [
      "link_pattern": r'href="(https://www\.alternate\.de/[^"]*30-Jahre[^"]*/html/product/\d+)"'},
 
     # Große Händler
-    {"name": "MediaMarkt", "type": "jsonld", "base": "https://www.mediamarkt.de",
-     "url": "https://www.mediamarkt.de/de/search.html?query=pokemon%2030%20jahre"},
-    {"name": "Saturn", "type": "jsonld", "base": "https://www.saturn.de",
-     "url": "https://www.saturn.de/de/search.html?query=pokemon%2030%20jahre"},
+    # MediaMarkt/Saturn funktionieren lokal, blocken aber GitHub-Server (403) – daher aus.
+    # {"name": "MediaMarkt", "type": "jsonld", "base": "https://www.mediamarkt.de",
+    #  "url": "https://www.mediamarkt.de/de/search.html?query=pokemon%2030%20jahre"},
+    # {"name": "Saturn", "type": "jsonld", "base": "https://www.saturn.de",
+    #  "url": "https://www.saturn.de/de/search.html?query=pokemon%2030%20jahre"},
     {"name": "Müller", "type": "jsonld", "base": "https://www.mueller.de",
      "url": "https://www.mueller.de/search/?q=pokemon+30+jahre+sammelkarten"},
     {"name": "Otto", "type": "jsonld", "base": "https://www.otto.de",
